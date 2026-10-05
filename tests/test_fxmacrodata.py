@@ -1,6 +1,8 @@
 import json
 from datetime import date, timedelta
+from email.message import Message
 from urllib.parse import parse_qs, urlparse
+from urllib.request import HTTPRedirectHandler
 
 import pytest
 
@@ -108,3 +110,32 @@ def test_fetch_dataset_never_sends_limit_above_100(fake_api):
     client = fxmacrodata.FXMacroDataClient()
     client.fetch_dataset("commodity", indicator="gold", limit=500)
     assert parse_qs(urlparse(fake_api[0].full_url).query)["limit"] == ["100"]
+
+
+def test_api_key_is_not_forwarded_on_redirect(fake_api):
+    client = fxmacrodata.FXMacroDataClient(api_key="test-key")
+    client.fetch_dataset("forex", base="eur", quote="usd", limit=5)
+    redirected = HTTPRedirectHandler().redirect_request(
+        fake_api[0], None, 302, "Found", Message(), "https://other.example/v1"
+    )
+    assert redirected.get_header("X-api-key") is None
+
+
+def test_api_key_with_control_characters_is_rejected_without_echo():
+    with pytest.raises(ValueError) as excinfo:
+        fxmacrodata.FXMacroDataClient(api_key="test-\nkey")
+    assert "test-" not in str(excinfo.value)
+    assert fxmacrodata.FXMacroDataClient(api_key=" test-key ").api_key == "test-key"
+
+
+def test_error_body_with_http_200_raises_clean_error(monkeypatch):
+    monkeypatch.setattr(
+        fxmacrodata,
+        "urlopen",
+        lambda request, timeout=None: _Response({"detail": "Not authorized"}),
+    )
+    client = fxmacrodata.FXMacroDataClient()
+    with pytest.raises(ValueError, match="Not authorized"):
+        client.dataframe("calendar", currency="usd")
+    with pytest.raises(ValueError, match="Not authorized"):
+        client.dataframe("forex", base="eur", quote="usd")
